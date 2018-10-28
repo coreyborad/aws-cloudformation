@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sample for dynamodb
+Parameters:
+  TableName:
+    Description: DynamoDBTableName
+    Type: String
+    Default: Tablename
+Resources:
+  DynamoDBTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref TableName
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: 'N'
+        - AttributeName: unixtime
+          AttributeType: 'N'
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: unixtime
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: '1'
+        WriteCapacityUnits: '1'
+      Tags:
+        - Value: !Sub '${AWS::StackName}-DynamoDB'
+          Key: Name
+Outputs:
+  TableName:
+    Description: DynamoDBTableName
+    Value: !Sub '${TableName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DynamoDBTableName'

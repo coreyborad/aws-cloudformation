@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: SAMPLE Route53
+Parameters:
+  ReferenceStackName:
+    Description: Main stack name
+    Type: String
+    Default: SAMPLE
+  ParentStackName:
+    Description: Main stack name
+    Type: String
+    Default: SAMPLE
+  HostedZoneId:
+    Description: sdc-acer.com
+    Type: 'AWS::Route53::HostedZone::Id'
+    Default: "HOSTEDZONEID"
+  WebDomainName:
+    Description: WebDomainName
+    Type: String
+    Default: "WEBDOMAIN"
+  MqttDomainName:
+    Description: MqttDomainName
+    Type: String
+    Default: "MQTTDOMAIN"
+Resources:
+  RecordSetWeb:
+    Type: 'AWS::Route53::RecordSetGroup'
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref WebDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId: 
+              Fn::ImportValue: !Sub '${ReferenceStackName}-EC2-WebLoadBalancerCHZId'
+            DNSName:
+              Fn::ImportValue: !Sub '${ReferenceStackName}-EC2-WebLoadBalancerDns'
+  RecordSetMqtt:
+    Type: 'AWS::Route53::RecordSetGroup'
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref MqttDomainName
+          Type: A
+          AliasTarget:
+            HostedZoneId:
+              Fn::ImportValue: !Sub '${ReferenceStackName}-EC2-MqttLoadBalancerCHZId'
+            DNSName:
+              Fn::ImportValue: !Sub '${ReferenceStackName}-EC2-MqttLoadBalancerDns'
+Outputs:
+  WebDomainName:
+    Description: RDS Endpoint
+    Value: !Sub '${WebDomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebDomainName'
+  MqttDomainName:
+    Description: RDS Endpoint
+    Value: !Sub '${MqttDomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-MqttDomainName'

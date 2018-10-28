@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: sample RDS
+Parameters:
+  ReferenceStackName:
+    Description: Main stack name
+    Type: String
+    Default: sample
+  ParentStackName:
+    Description: Main stack name
+    Type: String
+    Default: sample
+  DBName:
+    Default: SAMPLEPROJECT
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '^([a-zA-Z][a-zA-Z0-9]*)$'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBUser:
+    NoEcho: 'true'
+    Default: root
+    Description: The database admin account username
+    Type: String
+    MinLength: '4'
+    MaxLength: '16'
+    AllowedPattern: '^([a-zA-Z][a-zA-Z0-9]*)$'
+    ConstraintDescription: >-
+      must begin with a letter and contain only alphanumeric characters and be
+      at least 5 characters.
+  DBPassword:
+    NoEcho: 'true'
+    Default: "password"
+    Description: The database admin account password
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '^([a-z0-9A-Z`~!#$%^&*()_+,\\-]*)$'
+    ConstraintDescription: >-
+      Must be letters (upper or lower), numbers, and these special characters
+      '_'`~!#$%^&*()_+,-
+  DBEngineVersion:
+    Description: Mysql engine version
+    Type: String
+    Default: '5.7'
+    AllowedValues:
+      - '5.5'
+      - '5.6'
+      - '5.7'
+  DBAllocatedStorage:
+    Default: '10'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '5'
+    MaxValue: '1024'
+    ConstraintDescription: must be between 5 and 1024Gb.
+  DBInstanceClass:
+    Description: The database instance type
+    Type: String
+    Default: db.t2.micro
+    AllowedValues:
+      - db.t2.micro
+      - db.m4.large
+    ConstraintDescription: must select a valid database instance type.
+  MultiAZ:
+    Description: Multi-AZ master database
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: must be true or false.
+Resources:
+  MasterDB:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBName: !Ref DBName
+      AllocatedStorage: !Ref DBAllocatedStorage
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: MySQL
+      EngineVersion: !Ref DBEngineVersion
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      MultiAZ: !Ref MultiAZ
+      Tags:
+        - Key: Name
+          Value: Master Database
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub '${ParentStackName}-SG-RdsSecurityGroupId'
+      DBSubnetGroupName: !Ref sampleDBSubnetGroup
+    DeletionPolicy: Snapshot
+  sampleDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: sample DB subnet group
+      SubnetIds:
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PrivateSubnet1Id'
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PrivateSubnet2Id'
+Outputs:
+  MasterRDSEndPoint:
+    Description: RDS Endpoint
+    Value: !GetAtt 
+      - MasterDB
+      - Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-MasterRDSEndPoint'
+  MasterRDSPort:
+    Description: RDS Port
+    Value: !GetAtt 
+      - MasterDB
+      - Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-MasterRDSPort'

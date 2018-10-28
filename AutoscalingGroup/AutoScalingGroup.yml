@@ -1,0 +1,577 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sample for autoscaling group
+Mappings:
+  RegionMap:
+    ap-northeast-1:
+      AMI: "AMIID"
+Parameters:
+  WebDomainName:
+    Description: Web domain name
+    Type: String
+    Default: "Domain name"
+  EC2SSHKey:
+    Description: The EC2 SSH key
+    Type: String
+    Default: "SSH KEY NAME"
+    AllowedValues:
+      - "KEY NAME"
+    ConstraintDescription: must select a valid EC2 SSH key.
+  EC2InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: t2.nano
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - c4.large
+    ConstraintDescription: must select a valid EC2 instance type.
+  AwsAccessKeyId:
+    Description: AWS Access Key ID
+    Type: String
+    Default: "ACCESS KEY"
+  AwsSecretAccessKey:
+    Description: AWS Secret Access Key
+    Type: String
+    Default: "SECRET ACCESS KEY"
+  BucketName:
+    Description: Images Bucket Name
+    Type: String
+    Default: "BUCKET NAME"
+  BucketFolderPath:
+    Description: Images Bucket Folder Path
+    Type: String
+    Default: "IMAGE BUCKET FLODER PATH"
+  CertificateARN:
+    Description: Certificates
+    Type: String
+    Default: >-
+      "CERTIFICATES ARN"
+Resources:
+  EC2LaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          deployServer:
+            - initEnv
+            - startService
+        initEnv:
+          files:
+            /opt/aws/env.sh:
+              content: !Sub |
+                #!/bin/bash -xe
+                sudo apt-get install python-yaml
+                sudo locale-gen en_US.UTF-8
+                export LC_ALL=en_US.UTF-8
+                export LANG=en_US.UTF-8
+                sudo pip install boto3
+              mode: '000600'
+              owner: root
+              group: root
+          commands:
+            env:
+              command: 'sudo sh env.sh'
+              ignoreErrors: 'false'
+        startService:
+          files:
+            /opt/aws/upgrade.py:
+              content: !Sub |
+                # coding: utf-8
+                import os
+                import sys
+                import boto3
+                import yaml
+                import json
+                import datetime
+                import subprocess
+                import threading
+                import fileinput
+
+
+                class ProgressPercentage(object):
+                    def __init__(self, file):
+                        self._filename = file.get('Key')
+                        self._size = float(file.get('Size'))
+                        self._seen_so_far = 0
+                        self._lock = threading.Lock()
+
+                    def __call__(self, bytes_amount):
+                        self._seen_so_far += bytes_amount
+                        with self._lock:
+                            self._seen_so_far += bytes_amount
+                            percentage = (self._seen_so_far / self._size) * 100
+                            sys.stdout.write(
+                                "\r%s  %s / %s  (%.2f%%)" % (
+                                    self._filename, self._seen_so_far, self._size,
+                                    percentage))
+                            sys.stdout.flush()
+                            if int(percentage) >= 200:
+                                print "\n%s %s" % (
+                                    '['+str(datetime.datetime.now())+']', "Download finish")
+
+
+                class UpgradeUtils(object):
+                    def __init__(self, config):
+                        self._config = config
+                        self._aws_access_key_id = config['aws_access_key_id']
+                        self._aws_secret_access_key = config['aws_secret_access_key']
+                        self._aws_region_name = config['aws_region_name']
+                        self._bucket_name = config['bucket_name']
+                        self._bucket_folder_path = config['bucket_folder_path']
+                        self._s3 = self._get_s3()
+                        self._s3_resource = self._get_s3_resource()
+                        self._cf = self._get_cf()
+                        self._localpath = os.path.dirname(os.path.abspath(__file__))
+
+                    def _log(self, message):
+                        print "%s %s" % ('['+str(datetime.datetime.now())+']', message)
+
+                    # 取得S3 clinet obj
+                    def _get_s3(self):
+                        try:
+                            s3 = boto3.client(
+                                's3',
+                                aws_access_key_id=self._aws_access_key_id,
+                                aws_secret_access_key=self._aws_secret_access_key)
+                            return s3
+                        except:
+                            self._log('Create s3 client failed!')
+                            os._exit(1)
+
+                    # 取得Cloudformation clinet obj
+                    def _get_cf(self):
+                        try:
+                            cf = boto3.client(
+                                'cloudformation',
+                                aws_access_key_id=self._aws_access_key_id,
+                                aws_secret_access_key=self._aws_secret_access_key,
+                                region_name=self._aws_region_name)
+                            return cf
+                        except:
+                            self._log('Create cloudformation client failed!')
+                            os._exit(1)
+
+                    def _get_s3_resource(self):
+                        try:
+                            session = boto3.Session(
+                                aws_access_key_id=self._aws_access_key_id,
+                                aws_secret_access_key=self._aws_secret_access_key)
+                            s3_resource = session.resource("s3")
+                            return s3_resource
+                        except:
+                            self._log('Create s3 client failed!')
+                            os._exit(1)
+
+                    def _download_file_s3(self, dist):
+                        try:
+                            paginator = self._s3.get_paginator('list_objects')
+                            for result in paginator.paginate(Bucket=self._bucket_name, Delimiter='/', Prefix=dist):
+                                if result.get('CommonPrefixes') is not None:
+                                    for subdir in result.get('CommonPrefixes'):
+                                        self._download_file_s3(subdir.get('Prefix'))
+                                if result.get('Contents') is not None:
+                                    for file in result.get('Contents'):
+                                        local_path = self._localpath + \
+                                            os.sep + file.get('Key')
+                                        if not os.path.exists(os.path.dirname(local_path)):
+                                            os.makedirs(os.path.dirname(local_path))
+                                        if not file.get('Key').endswith('/'):
+                                            self._s3_resource.meta.client.download_file(self._bucket_name, file.get(
+                                                'Key'), local_path, Callback=ProgressPercentage(file))
+                        except Exception as e:
+                            print(e)
+                            os._exit(1)
+
+                    def _stop_container(self):
+                        try:
+                            # 檢查是不是有下載Scripts
+                            # 沒有下載就直接跳出
+                            if not os.path.isdir(self._localpath + "/" + "sample"):
+                                return True
+                            else:
+                                command = "docker-compose -f " + self._localpath + "/" + \
+                                    "sample/docker/docker-compose/aws/docker-compose.yml down -v"
+                                self._log(command)
+                                subprocess.call(command, shell=True)
+                        except:
+                            self._log("Stop container(s) failed!")
+
+                    def _remove_file(self):
+                        try:
+                            # 檢查是不是有下載Scripts
+                            # 沒有下載就直接跳出
+                            if not os.path.isdir(self._localpath + "/" + "sample"):
+                                return True
+                            else:
+                                command = "docker rmi sdcmod_web:aws"
+                                self._log(command)
+                                subprocess.call(command, shell=True)
+                                command = "docker rmi sdcmod_mqtt:aws"
+                                self._log(command)
+                                subprocess.call(command, shell=True)
+                                command = "sudo rm -rf " + self._localpath + "/" + "sample"
+                                self._log(command)
+                                subprocess.call(command, shell=True)
+                        except:
+                            self._log("Remove images failed!")
+
+                    def _load_image(self):
+                        try:
+                            command = "docker load < " + self._localpath + "/" + "sample/docker/web.tar"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                            command = "docker load < " + self._localpath + "/" + "sample/docker/mqtt.tar"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                        except:
+                            self._log("Load images failed!")
+
+                    def _launch_docker(self):
+                        try:
+                            command = "docker-compose -f " + self._localpath + "/" + \
+                                "sample/docker/docker-compose/aws/docker-compose.yml up -d"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                        except:
+                            self._log("launch_docker failed!")
+
+                    def _modify_env(self):
+                        exports = self._cf.list_exports()['Exports']
+                        env_file = "/opt/aws/.env"
+                        website_file = "/opt/aws/website.json"
+                        self._log("##### Edit config Start")
+                        try:
+                            for export in exports:
+                                # RDS endpoint
+                                if export['Name'] == self._config['Name'] + '-RDS-MasterRDSEndPoint':
+                                    for line in fileinput.input(env_file, inplace=True):
+                                        if 'DB_HOST=' in line:
+                                            print("DB_HOST=" + export['Value'])
+                                        else:
+                                            print(line.rstrip())
+                                # RDS port
+                                if export['Name'] == self._config['Name'] + '-RDS-MasterRDSPort':
+                                    for line in fileinput.input(env_file, inplace=True):
+                                        if 'DB_PORT=' in line:
+                                            print("DB_PORT=" + export['Value'])
+                                        else:
+                                            print(line.rstrip())
+                                # DynamoDB tablename
+                                if export['Name'] == self._config['Name'] + '-NoSql-DynamoCarLogTableName':
+                                    for line in fileinput.input(env_file, inplace=True):
+                                        if 'DYNAMODB_TABLE_NAME=' in line:
+                                            print("DYNAMODB_TABLE_NAME=" + export['Value'])
+                                        else:
+                                            print(line.rstrip())
+                            command = "docker cp " + env_file + \
+                                " sdcmod_web:/var/www/html/app/SDCMOD/api/.env"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                            command = "docker cp " + website_file + \
+                                " sdcmod_web:/var/www/html/app/SDCMOD/dashboard/configs/website.json"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                        except Exception as e:
+                            self._log(e)
+
+                    def _refresh_db(self):
+                        try:
+                            command = "sudo sh " + self._localpath + "/setup_db.sh"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                        except:
+                            self._log("refresh_db failed!")
+
+                    def _clear_tar(self):
+                        try:
+                            command = "sudo rm -rf " + self._localpath + "/" + "sample/docker/*.tar"
+                            self._log(command)
+                            subprocess.call(command, shell=True)
+                        except:
+                            self._log("Load images failed!")
+
+                    def upgrade(self):
+                        self._log('Start upgrade')
+                        # Downlod file on s3
+                        self._stop_container()
+                        self._remove_file()
+                        self._download_file_s3(self._bucket_folder_path)
+                        self._load_image()
+                        self._launch_docker()
+                        self._modify_env()
+                        self._refresh_db()
+                        self._clear_tar()
+                        self._log('Upgrade done')
+
+
+                def main():
+                    config = yaml.load(open(os.path.dirname(
+                        os.path.abspath(__file__))+'/config.yaml'))
+                    utils = UpgradeUtils(config)
+                    utils.upgrade()
+
+
+                if __name__ == "__main__":
+                    main()
+
+              mode: '000600'
+              owner: root
+              group: root
+          commands:
+            upgrade:
+              command: sudo python /opt/aws/upgrade.py
+              ignoreErrors: 'false'
+    Properties:
+      ImageId: !FindInMap 
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      IamInstanceProfile: 
+        Fn::ImportValue: !Sub '${ParentStackName}-SSM-IamSSMForEC2'
+      KeyName: !Ref EC2SSHKey
+      InstanceType: !Ref EC2InstanceType
+      AssociatePublicIpAddress: 'true'
+      InstanceMonitoring: 'true'
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${ParentStackName}-SG-MqttSecurityGroupId'
+        - Fn::ImportValue: !Sub '${ParentStackName}-SG-EC2SecurityGroupId'
+      UserData:        
+        'Fn::Base64':
+          !Sub |
+            #!/bin/bash -xe
+            cd /opt
+
+            sudo curl -O https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-1.4-27.tar.gz
+
+            sudo tar -xvpf aws-cfn-bootstrap-1.4-27.tar.gz
+
+            cd aws-cfn-bootstrap-1.4/
+
+            sudo python setup.py build
+
+            sudo python setup.py install
+
+            cd /opt
+
+            sudo mkdir aws
+
+            cd aws
+
+            sudo mkdir bin
+
+            sudo ln -s /usr/bin/cfn-hup /opt/aws/bin/cfn-hup
+
+            sudo ln -s /usr/bin/cfn-init /opt/aws/bin/cfn-init
+
+            sudo ln -s /usr/bin/cfn-signal /opt/aws/bin/cfn-signal
+
+            sudo ln -s /usr/bin/cfn-elect-cmd-leader /opt/aws/bin/cfn-elect-cmd-leader
+
+            sudo ln -s /usr/bin/cfn-get-metadata /opt/aws/bin/cfn-get-metadata
+
+            sudo ln -s /usr/bin/cfn-send-cmd-event /opt/aws/bin/cfn-send-cmd-event
+
+            sudo ln -s /usr/bin/cfn-send-cmd-result /opt/aws/bin/cfn-send-cmd-result
+
+            sudo cfn-init --configsets deployServer --verbose --stack ${AWS::StackName} --resource EC2LaunchConfiguration --region ${AWS::Region}
+  EC2AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      Cooldown: '300'
+      DesiredCapacity: '1'
+      HealthCheckGracePeriod: '300'
+      HealthCheckType: EC2
+      MaxSize: '1'
+      MinSize: '1'
+      TargetGroupARNs:
+        - !Ref WebELBTargetGroup
+        - !Ref MqttELBTargetGroup
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet1Id'
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet2Id'
+      LaunchConfigurationName: !Ref EC2LaunchConfiguration
+      TerminationPolicies:
+        - Default
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-AutoScalingGroup'
+          PropagateAtLaunch: 'true'
+  EC2ScaleUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref EC2AutoScalingGroup
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+  EC2ScaleDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref EC2AutoScalingGroup
+      Cooldown: '60'
+      ScalingAdjustment: '-1'
+  EC2CPUAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if CPU > 80% for 5 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '80'
+      AlarmActions:
+        - !Ref EC2ScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref EC2AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+  EC2CPUAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if CPU < 30% for 5 minutes
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '30'
+      AlarmActions:
+        - !Ref EC2ScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref EC2AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+  EC2MemoryAlarmHigh:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-up if Memory > 80% for 5 minutes
+      MetricName: MemoryUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '80'
+      AlarmActions:
+        - !Ref EC2ScaleUpPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref EC2AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+  EC2MemoryAlarmLow:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: Scale-down if Memory < 50% for 5 minutes
+      MetricName: MemoryUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '1'
+      Threshold: '50'
+      AlarmActions:
+        - !Ref EC2ScaleDownPolicy
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref EC2AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+  WebELBLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets:
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet1Id'
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet2Id'
+      SecurityGroups:
+        - Fn::ImportValue: !Sub '${ParentStackName}-SG-EC2SecurityGroupId'
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-WebELB'
+  WebELBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebELBTargetGroup
+      LoadBalancerArn: !Ref WebELBLoadBalancer
+      Port: '443'
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateARN
+  WebELBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: '30'
+      HealthCheckTimeoutSeconds: '10'
+      HealthyThresholdCount: '5'
+      UnhealthyThresholdCount: '5'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      Port: '80'
+      Protocol: HTTP
+      VpcId: 
+        Fn::ImportValue: !Sub '${ParentStackName}-VPC-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-WebELBTG'
+  MqttELBLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet1Id'
+        - Fn::ImportValue: !Sub '${ParentStackName}-VPC-PublicSubnet2Id'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-MqttELB'
+      Type: network
+  MqttELBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MqttELBTargetGroup
+      LoadBalancerArn: !Ref MqttELBLoadBalancer
+      Port: '1883'
+      Protocol: TCP
+  MqttELBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      Port: 1883
+      Protocol: TCP
+      VpcId: 
+        Fn::ImportValue: !Sub '${ParentStackName}-VPC-VpcId'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-MqttELBTG'
+Outputs:
+  WebLoadBalancerDns:
+    Description: Web Load Balancer DNS
+    Value: !GetAtt 
+      - WebELBLoadBalancer
+      - DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-WebLoadBalancerDns'
+  MqttLoadBalancerDns:
+    Description: Mqtt Load Balancer DNS
+    Value: !GetAtt 
+      - MqttELBLoadBalancer
+      - DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-MqttLoadBalancerDns'
+  WebLoadBalancerCHZId:
+    Description: Web Load Balancer CHZId
+    Value: !GetAtt 
+      - WebELBLoadBalancer
+      - CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${AWS::StackName}-WebLoadBalancerCHZId'
+  MqttLoadBalancerCHZId:
+    Description: Mqtt Load Balancer CHZId
+    Value: !GetAtt 
+      - MqttELBLoadBalancer
+      - CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${AWS::StackName}-MqttLoadBalancerCHZId'
